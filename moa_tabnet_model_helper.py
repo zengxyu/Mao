@@ -1,4 +1,5 @@
 import sys
+
 sys.path.append('../input/pytorch-tabnet')
 
 import numpy as np
@@ -10,7 +11,7 @@ tabnet_params = dict(
     n_d=24, n_a=24, n_steps=1, gamma=1.3,
     lambda_sparse=0, optimizer_fn=torch.optim.Adam,
     optimizer_params=dict(lr=2e-2, weight_decay=1e-5),
-    mask_type='entmax',
+    # mask_type='entmax',
     scheduler_fn=torch.optim.lr_scheduler.ReduceLROnPlateau,
     scheduler_params=dict(mode="min", patience=5, min_lr=1e-5, factor=0.9, ),
     # epoch打印间隔
@@ -24,7 +25,8 @@ class TabnetModelHelper:
         self.model = MyTabnetRegressor(**tabnet_params)
         self.loss_fn = torch.nn.functional.binary_cross_entropy_with_logits
 
-    def fit(self, data, n_epochs=None, patience=None, train_batch_size=None, val_batch_size=None):
+    def fit_and_save(self, data, n_epochs=None, patience=None, train_batch_size=None, val_batch_size=None,
+                     model_save_path=None):
         x_train, y_train, x_val, y_val = data
 
         self.model.fit(x_train, y_train,
@@ -36,6 +38,7 @@ class TabnetModelHelper:
                        num_workers=0, drop_last=False,
                        # use binary cross entropy as this is not a regression problem
                        loss_fn=self.loss_fn)
+        self.model.save_model(model_save_path)
 
     def predict(self, x_test, model_path):
         self.model.load_model(model_path)
@@ -44,9 +47,6 @@ class TabnetModelHelper:
         loaded_preds = 1 / (1 + np.exp(-loaded_preds))
 
         return loaded_preds
-
-    def save_model(self, model_path):
-        self.model.save_model(model_path)
 
 
 class MyTabnetRegressor(TabNetRegressor):

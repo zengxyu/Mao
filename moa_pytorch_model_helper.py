@@ -84,8 +84,8 @@ class PytorchModelHelper:
 
         return best_loss, best_model
 
-    def fit(self, model_name, data, n_epochs=None, scheduler=None, patience=None, train_batch_size=None,
-            val_batch_size=None):
+    def fit_and_save(self, model_name, data, n_epochs=None, scheduler=None, patience=None, train_batch_size=None,
+                     val_batch_size=None, model_save_path=None):
         best_loss = {'train': np.inf, 'val': np.inf}
         best_model = None
         early_step = 0
@@ -113,7 +113,9 @@ class PytorchModelHelper:
                 early_step += 1
                 if early_step >= patience:
                     break
-        return best_loss, best_model
+        torch.save(best_model, model_save_path)
+
+        return best_loss
 
     def predict(self, model_name, data, test_batch_size, model_path):
         self.test_loader, self.num_features = self.__test_data_factory(data=data, test_batch_size=test_batch_size)

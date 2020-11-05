@@ -1,9 +1,10 @@
 import os
+import pickle
 import sys
 
 from sklearn.feature_selection import VarianceThreshold
 
-sys.path.append('../input/rank-gauss')
+sys.path.append('../input/rankgauss')
 sys.path.append('../input/')
 import numpy as np
 import pandas as pd
@@ -193,16 +194,16 @@ def encode_feature(df_features_all, cols_features, encoding):
     return df_features_all
 
 
-def add_square_features(df_features_all):
+def add_square_features(df_features_all, cols_feature_numeric):
     """
     添加高维度特征，（平方特征）
     :param df_features_all:
     :return:
     """
     # 这四个特征是平方后，并使用lightgbm训练后，显示最重要的四个平方特征
-    features_cols = ['c-98', 'g-300', 'g-7', 'g-100']
+    features_cols = ['g-7', 'g-91', 'g-100', 'g-130', 'g-175', 'g-300', 'g-608', 'c-98']
     for col in features_cols:
-        df_features_all[col + "-square"] = df_features_all[col].apply(lambda a: a ** 2)
+        df_features_all[col + "_square"] = df_features_all[col].apply(lambda a: a ** 2)
     return df_features_all
 
 
@@ -236,21 +237,22 @@ def generate_new_features(df_features_all):
 class MoaPreprocess:
     def __init__(self, root_dir):
         self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored, self.df_x_test = read_data(root_dir)
-        self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored, self.df_x_test = drop_ctl_vehicle_samples_and_cols(
-            self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored, self.df_x_test)
+        self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored, self.df_x_test = \
+            drop_ctl_vehicle_samples_and_cols(self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored,
+                                              self.df_x_test)
         # 标签列
         self.cols_label = [col for col in self.df_y_train.columns]
         # 特征列
         self.cols_feature = [col for col in self.df_x_train.columns]
-        # 类别型特征
+        # 类别型特征，类别型特征会被编码
         self.cols_feature_category = ['cp_time', 'cp_dose']
-        # 数值型特征
+        # 数值型特征， 数值型特征会被修改
         self.cols_feature_numeric = [feat for feat in self.cols_feature if
                                      feat not in self.cols_feature_category]
 
         # 标签列的数量
         self.num_cols_label = len(self.cols_label)
-        # 特征列的数量
+        # 特征列的数量, 特征列的数量会被修改
         self.num_features_label = len(self.cols_feature)
         # 训练样本的数量
         self.num_train_samples = self.df_x_train.shape[0]
@@ -262,26 +264,36 @@ class MoaPreprocess:
         self.y_train_with_non_scored = None
         self.x_test = None
 
-    def process_for_pytorch2(self, variance_thresh, scale, encoding, n_gene_comp, n_cell_comp, base_seed):
-        # 处理
+    def process(self, preprocess_param, base_seed):
+
         df_feature_all = pd.concat([self.df_x_train, self.df_x_test], ignore_index=True)
-        # 添加高维特征(平方特征)
-        df_feature_all = add_square_features(df_feature_all)
-        print("after adding square features -- df shape: ", df_feature_all.shape)
-        # gauss rank将特征规范化
-        df_feature_all = gauss_rank(df_feature_all)
-        # 提取主成分，并将主成分加入特征
-        df_feature_all, self.cols_feature_numeric = decompose_pca(df_feature_all, n_gene_comp, n_cell_comp,
-                                                                  self.cols_feature_category, base_seed)
-        # df_feature_all = generate_new_features(df_feature_all)
-        # 滤掉方差较小的特征
-        df_feature_all, self.cols_feature_numeric = filter_feature_by_variance(df_feature_all,
-                                                                               self.cols_feature_category,
-                                                                               self.cols_feature_numeric,
-                                                                               variance_thresh)
-        # 编码类别型特征
-        df_feature_all = encode_feature(df_features_all=df_feature_all, cols_features=['cp_time', 'cp_dose'],
-                                        encoding=encoding)
+        # 处理
+        if preprocess_param['is_add_feature']:
+            # 添加高维特征(平方特征)
+            df_feature_all = add_square_features(df_feature_all, self.cols_feature_numeric)
+            print("add feature processing, after adding square features -- df shape: ", df_feature_all.shape)
+        if preprocess_param['is_gauss_rank']:
+            # gauss rank将特征规范化
+            df_feature_all = gauss_rank(df_feature_all)
+            print("gauss rank processing")
+        if preprocess_param['is_pca']:
+            # 提取主成分，并将主成分加入特征
+            df_feature_all, self.cols_feature_numeric = decompose_pca(df_feature_all, preprocess_param['n_gene_comp'],
+                                                                      preprocess_param['n_cell_comp'],
+                                                                      self.cols_feature_category, base_seed)
+            print("pca processing")
+        if preprocess_param['is_filtered_by_var']:
+            # 滤掉方差较小的特征
+            df_feature_all, self.cols_feature_numeric = filter_feature_by_variance(df_feature_all,
+                                                                                   self.cols_feature_category,
+                                                                                   self.cols_feature_numeric,
+                                                                                   preprocess_param['variance_thresh'])
+            print("filtered by variance processing")
+        if preprocess_param['is_encoding']:
+            # 编码类别型特征
+            df_feature_all = encode_feature(df_features_all=df_feature_all, cols_features=self.cols_feature_category,
+                                            encoding=preprocess_param['encoding'])
+            print("encoding processing")
 
         x_train = df_feature_all[:self.num_train_samples]
         x_train.reset_index(drop=True, inplace=True)
@@ -293,64 +305,6 @@ class MoaPreprocess:
 
         self.y_train = self.df_y_train.values
         self.y_train_with_non_scored = self.df_y_train_with_non_scored.values
-
-        return self.x_train, self.y_train, self.y_train_with_non_scored, self.x_test, self.cols_label, self.num_cols_label
-
-    def process_for_pytorch(self, variance_thresh, scale, encoding, n_gene_comp, n_cell_comp, base_seed):
-        # 处理
-        df_feature_all = pd.concat([self.df_x_train, self.df_x_test], ignore_index=True)
-
-        df_feature_all = gauss_rank(df_feature_all)
-        # df_feature_all = normalize_data(df_feature_all, self.cols_feature_numeric, scale)
-
-        df_feature_all, self.cols_feature_numeric = decompose_pca(df_feature_all, n_gene_comp, n_cell_comp,
-                                                                  self.cols_feature_category, base_seed)
-        # df_feature_all = generate_new_features(df_feature_all)
-        # with new features: 1539, without new features:1524
-        df_feature_all, self.cols_feature_numeric = filter_feature_by_variance(df_feature_all,
-                                                                               self.cols_feature_category,
-                                                                               self.cols_feature_numeric,
-                                                                               variance_thresh)
-        df_feature_all = encode_feature(df_features_all=df_feature_all, cols_features=['cp_time', 'cp_dose'],
-                                        encoding=encoding)
-
-        # with new features : 1045, without new features:1045
-        x_train = df_feature_all[:self.num_train_samples]
-        x_train.reset_index(drop=True, inplace=True)
-        self.x_train = x_train.values
-
-        x_test = df_feature_all[-self.num_test_samples:]
-        x_test.reset_index(drop=True, inplace=True)
-        self.x_test = x_test.values
-
-        self.y_train = self.df_y_train.values
-
-        return self.x_train, self.y_train, self.x_test, self.cols_label, self.num_cols_label
-
-    def process_for_tabnet(self, variance_thresh, scale, encoding, n_gene_comp, n_cell_comp, base_seed):
-        # 处理
-        df_feature_all = pd.concat([self.df_x_train, self.df_x_test], ignore_index=True)
-
-        df_feature_all = gauss_rank(df_feature_all)
-
-        df_feature_all, self.cols_feature_numeric = decompose_pca(df_feature_all, n_gene_comp, n_cell_comp,
-                                                                  self.cols_feature_category, base_seed)
-        df_feature_all, self.cols_feature_numeric = filter_feature_by_variance(df_feature_all,
-                                                                               self.cols_feature_category,
-                                                                               self.cols_feature_numeric,
-                                                                               variance_thresh)
-        df_feature_all = encode_feature(df_features_all=df_feature_all, cols_features=['cp_time', 'cp_dose'],
-                                        encoding=encoding)
-
-        x_train = df_feature_all[:self.num_train_samples]
-        x_train.reset_index(drop=True, inplace=True)
-        self.x_train = x_train.values
-
-        x_test = df_feature_all[-self.num_test_samples:]
-        x_test.reset_index(drop=True, inplace=True)
-        self.x_test = x_test.values
-
-        self.y_train = self.df_y_train.values
 
         return self.x_train, self.y_train, self.y_train_with_non_scored, self.x_test, self.cols_label, self.num_cols_label
 
