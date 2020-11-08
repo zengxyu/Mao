@@ -67,7 +67,7 @@ if __name__ == '__main__':
 
     with open(fn, 'rb') as f:
         fi = pickle.load(f)
-        sorted_fi = fi.sort_values(by='feature_importances', ascending=True)
+        sorted_fi = fi.sort_values(by='feature_importances', ascending=False)
 
     # sorted_fi = sorted_fi[sorted_fi['features']]
     # sorted_fi = sorted_fi[sorted_fi['features'].str.contains('_square')]
@@ -75,9 +75,9 @@ if __name__ == '__main__':
     print("num features : ", num_features)
     # 最重要的特征
     top_sorted_fi = sorted_fi.iloc[:int(num_features * 0.01)]
-    bottome_sorted_fi = sorted_fi.iloc[-int(num_features * 0.01):]
+    bottome_sorted_fi = sorted_fi.iloc[-int(num_features * 0.02):]
 
-    print("ibj:")
+    print("top_sorted_fi:")
     print(top_sorted_fi)
-    print("obj:")
+    print("bottome_sorted_fi:")
     print(bottome_sorted_fi)

@@ -29,7 +29,7 @@ param = {
     'root_dir': "../input",
     'base_seed': 2020,
     'n_folds': 10,
-    'n_epochs': 100,
+    'n_epochs': 200,
     'scheduler': 'pla',  # choose scheduler from ['pla','cycle']
     'patience': 10,
     'train_batch_size': 1024,
@@ -40,37 +40,49 @@ param = {
 pytorch_preprocess_param = {
     'is_drop_ctl_vehicle': True,
 
-    'is_add_feature': True,
+    'is_add_square_feature': True,
+
+    'is_delete_feature': False,
 
     'is_gauss_rank': True,
 
     'is_pca': True,
+    'is_svd': True,
     'n_gene_comp': 600,
     'n_cell_comp': 50,
 
     'is_filtered_by_var': True,
+    'is_filtered_by_var2': False,
     'variance_thresh': 0.8,
 
     'is_encoding': True,
-    'encoding': 'dummy'
+    'encoding': 'dummy',
+
+    'is_add_statistic_feature': False,
 }
 
 tabnet_preprocess_param = {
     'is_drop_ctl_vehicle': True,
 
-    'is_add_feature': False,
+    'is_add_square_feature': False,
+
+    'is_delete_feature': False,
 
     'is_gauss_rank': True,
 
-    'is_pca': False,
-    'n_gene_comp': 600,
-    'n_cell_comp': 50,
+    'is_pca': True,
+    'is_svd': False,
+    'n_gene_comp': 80,
+    'n_cell_comp': 10,
 
-    'is_filtered_by_var': False,
-    'variance_thresh': 0.8,
+    'is_filtered_by_var': True,
+    'is_filtered_by_var2': False,
+    'variance_thresh': 0.7,
 
     'is_encoding': True,
-    'encoding': 'dummy'
+    'encoding': 'dummy',
+
+    'is_add_statistic_feature': False
 }
 
 
@@ -184,26 +196,26 @@ def repeat_training_testing():
 
 
 if __name__ == '__main__':
-    base_seeds = [2020, 42, 1995, 57, 0, 12, 76, 53, 2021, 2016]
+    base_seeds = [2020, 42, 1995, 57, 0, 12, 76, 53, 2021, 2016, 2020, 42, 1995, 57, 0, 12, 76, 53, 2021, 2016]
     # model_names = ["model1", "model2", "model3", "tabnet"]
-    model_names = ["tabnet"]
+    model_names = ["model2", "model3", "tabnet"]
 
     start_time = time.time()
 
     repeat_time = 1
     preds_after_repeat = []
-    for i in range(repeat_time):
-        print("repeat time = {}".format(i))
+
+    for i, model_name in enumerate(model_names):
         param['base_seed'] = base_seeds[i]
-        for model_name in model_names:
-            param['output'] = 'output_{}_{}'.format(i, model_name)
-            print("model name = {}".format(model_name))
-            param['model_name'] = model_name
-            total_test_preds = repeat_training_testing()
-            # 将每次预测后的结果加到list中
-            preds_after_repeat.append(total_test_preds)
-    preds_after_repeat = np.mean(np.array(preds_after_repeat), axis=0)
+        param['output'] = 'output_{}_{}'.format(i, model_name)
+        print("model name = {}".format(model_name))
+        param['model_name'] = model_name
+        total_test_preds = repeat_training_testing()
+        # 将每次预测后的结果加到list中
+        preds_after_repeat.append(total_test_preds)
+
     print("preds after repeating -- shape:", np.shape(preds_after_repeat))
+    preds_after_repeat = np.mean(np.array(preds_after_repeat), axis=0)
     write_result(preds_after_repeat)
 
     duration_time = time.time() - start_time

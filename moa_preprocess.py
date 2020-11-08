@@ -3,6 +3,7 @@ import pickle
 import sys
 
 from sklearn.feature_selection import VarianceThreshold
+from tqdm import tqdm
 
 sys.path.append('../input/rankgauss')
 sys.path.append('../input/')
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.preprocessing import LabelEncoder, QuantileTransformer
 
 from gauss_rank.gauss_rank_scaler import GaussRankScaler
@@ -63,7 +64,18 @@ def drop_ctl_vehicle_samples_and_cols(df_x_train, df_y_train, df_y_train_with_no
     return df_x_train, df_y_train, df_y_train_with_non_scored, df_x_test
 
 
-def filter_feature_by_variance(df_features_all, cols_feature_category, cols_feature_numeric, variance_thresh):
+def filter_feature_by_variance2(df_features_all, cols_feature_category, variance_threshould):
+    cols_numeric = [feat for feat in list(df_features_all.columns) if
+                    feat not in cols_feature_category]
+    mask = (df_features_all[cols_numeric].var() >= variance_threshould).values
+    tmp = df_features_all[cols_numeric].loc[:, mask]
+    df_features_all = pd.concat([df_features_all[cols_feature_category], tmp], axis=1)
+    cols_numeric = [feat for feat in list(df_features_all.columns) if
+                    feat not in cols_feature_category]
+    return df_features_all, cols_numeric
+
+
+def filter_feature_by_variance(df_features_all, cols_feature_category, variance_thresh):
     """
     滤掉方差太小的特征
     :param df_features_all:
@@ -72,8 +84,14 @@ def filter_feature_by_variance(df_features_all, cols_feature_category, cols_feat
     :param variance_thresh:
     :return:
     """
-    var_thresh = VarianceThreshold(variance_thresh)  # <-- Update
-    tmp = var_thresh.fit_transform(df_features_all[cols_feature_numeric])
+    cols_numeric = [feat for feat in list(df_features_all.columns) if
+                    feat not in cols_feature_category]
+
+    var_thresh_selector = VarianceThreshold(variance_thresh)  # <-- Update
+    var_thresh_selector.fit(df_features_all[cols_numeric])
+
+    tmp = df_features_all[df_features_all.columns[var_thresh_selector.get_support(indices=True)]]
+
     df_features_all = pd.concat([df_features_all[cols_feature_category], pd.DataFrame(tmp)], axis=1)
 
     cols_feature_numeric = [feat for feat in list(df_features_all.columns) if
@@ -116,26 +134,53 @@ def decompose_pca(df_features_all, n_gene_comp, n_cell_comp, cols_feature_catego
     return df_features_all, cols_feature_numeric
 
 
-def gauss_rank(df_features_all):
+def decompose_svd(df_features_all, n_gene_comp, n_cell_comp, cols_feature_category, base_seed):
+    """
+    SVD分解
+    :param df_features_all:
+    :param n_gene_comp:
+    :param n_cell_comp:
+    :param base_seed:
+    :return:
+    """
+    gene_cols = [col for col in df_features_all.columns if col.startswith('g-')]
+    cell_cols = [col for col in df_features_all.columns if col.startswith('c-')]
+    svd_genes = TruncatedSVD(n_components=n_gene_comp, random_state=base_seed).fit_transform(df_features_all[gene_cols])
+    svd_cells = TruncatedSVD(n_components=n_cell_comp, random_state=base_seed).fit_transform(df_features_all[cell_cols])
+    svd_genes = pd.DataFrame(svd_genes, columns=[f'svd_g-{i}' for i in range(n_gene_comp)])
+    svd_cells = pd.DataFrame(svd_cells, columns=[f'svd_c-{i}' for i in range(n_cell_comp)])
+    df_features_all = pd.concat([df_features_all, svd_genes, svd_cells], axis=1)
+    cols_feature_numeric = [feat for feat in list(df_features_all.columns) if
+                            feat not in cols_feature_category]
+    return df_features_all, cols_feature_numeric
+
+
+def gauss_rank(df_features_all, cols_feature_category):
     """
     用gauss rank将数据规范化
     :param df_features_all:
     :return:
     """
-    gene_cols = [col for col in df_features_all.columns if col.startswith('g-')]
-    cell_cols = [col for col in df_features_all.columns if col.startswith('c-')]
+    # gene_cols = [col for col in df_features_all.columns if col.startswith('g-')]
+    # cell_cols = [col for col in df_features_all.columns if col.startswith('c-')]
+    cols_numeric = [feat for feat in list(df_features_all.columns) if
+                    feat not in cols_feature_category]
     # RankGauss
-    for col in (gene_cols + cell_cols):
+    for col in (cols_numeric):
         transformer = QuantileTransformer(n_quantiles=100, random_state=0, output_distribution="normal")
         vec_len = len(df_features_all[col].values)
         raw_vec = df_features_all[col].values.reshape(vec_len, 1)
         transformer.fit(raw_vec)
 
         df_features_all[col] = transformer.transform(raw_vec)
+
     return df_features_all
 
 
-def normalize_data(df_features_all, cols_feature_numeric, scale):
+def normalize_data(df_features_all, cols_feature_category, scale='rankgauss'):
+    cols_numeric = [feat for feat in list(df_features_all.columns) if
+                    feat not in cols_feature_category]
+
     def scale_minmax(col):
         return (col - col.min()) / (col.max() - col.min())
 
@@ -145,28 +190,28 @@ def normalize_data(df_features_all, cols_feature_numeric, scale):
     if scale == 'boxcox':
         # 通过 BoxCox 正态化
         print('boxcox')
-        df_features_all[cols_feature_numeric] = df_features_all[cols_feature_numeric].apply(scale_minmax, axis=0)
+        df_features_all[cols_numeric] = df_features_all[cols_numeric].apply(scale_minmax, axis=0)
         trans = []
-        for feat in cols_feature_numeric:
+        for feat in cols_numeric:
             trans_var, lambda_var = stats.boxcox(df_features_all[feat].dropna() + 1)
             trans.append(scale_minmax(trans_var))
-        df_features_all[cols_feature_numeric] = np.asarray(trans).T
+        df_features_all[cols_numeric] = np.asarray(trans).T
 
     elif scale == 'norm':
         # 通过标准化正态化
         print('norm')
-        df_features_all[cols_feature_numeric] = df_features_all[cols_feature_numeric].apply(scale_norm, axis=0)
+        df_features_all[cols_numeric] = df_features_all[cols_numeric].apply(scale_norm, axis=0)
 
     elif scale == 'minmax':
         # 归一化
         print('minmax')
-        df_features_all[cols_feature_numeric] = df_features_all[cols_feature_numeric].apply(scale_minmax, axis=0)
+        df_features_all[cols_numeric] = df_features_all[cols_numeric].apply(scale_minmax, axis=0)
 
     elif scale == 'rankgauss':
         # RankGauss
         print('rankgauss')
         scaler = GaussRankScaler()
-        df_features_all[cols_feature_numeric] = scaler.fit_transform(df_features_all[cols_feature_numeric])
+        df_features_all[cols_numeric] = scaler.fit_transform(df_features_all[cols_numeric])
     return df_features_all
 
 
@@ -194,7 +239,7 @@ def encode_feature(df_features_all, cols_features, encoding):
     return df_features_all
 
 
-def add_square_features(df_features_all, cols_feature_numeric):
+def add_square_features(df_features_all):
     """
     添加高维度特征，（平方特征）
     :param df_features_all:
@@ -207,30 +252,31 @@ def add_square_features(df_features_all, cols_feature_numeric):
     return df_features_all
 
 
+def delete_unimportant_features(df_features_all):
+    """
+    删除不重要的特征
+    :param df_features_all:
+    :return:
+    """
+    features_cols = ['g-502', 'g-727', 'c-2', 'c-71']
+    for col in features_cols:
+        del df_features_all[col]
+    return df_features_all
+
+
 def generate_new_features(df_features_all):
     """
     生成统计特征
     :param df_features_all:
     :return:
     """
-    GENES = [col for col in df_features_all.columns if col.startswith('g-')]
-    CELLS = [col for col in df_features_all.columns if col.startswith('c-')]
+    GENES = [col for col in df_features_all.columns if col.startswith("g-")]
+    CELLS = [col for col in df_features_all.columns if col.startswith("c-")]
 
-    df_features_all['g_sum'] = df_features_all[GENES].sum(axis=1)
-    df_features_all['g_mean'] = df_features_all[GENES].mean(axis=1)
-    df_features_all['g_std'] = df_features_all[GENES].std(axis=1)
-    df_features_all['g_kurt'] = df_features_all[GENES].kurtosis(axis=1)
-    df_features_all['g_skew'] = df_features_all[GENES].skew(axis=1)
-    df_features_all['c_sum'] = df_features_all[CELLS].sum(axis=1)
-    df_features_all['c_mean'] = df_features_all[CELLS].mean(axis=1)
-    df_features_all['c_std'] = df_features_all[CELLS].std(axis=1)
-    df_features_all['c_kurt'] = df_features_all[CELLS].kurtosis(axis=1)
-    df_features_all['c_skew'] = df_features_all[CELLS].skew(axis=1)
-    df_features_all['gc_sum'] = df_features_all[GENES + CELLS].sum(axis=1)
-    df_features_all['gc_mean'] = df_features_all[GENES + CELLS].mean(axis=1)
-    df_features_all['gc_std'] = df_features_all[GENES + CELLS].std(axis=1)
-    df_features_all['gc_kurt'] = df_features_all[GENES + CELLS].kurtosis(axis=1)
-    df_features_all['gc_skew'] = df_features_all[GENES + CELLS].skew(axis=1)
+    for stats in tqdm.tqdm(["sum", "mean", "std", "kurt", "skew"]):
+        df_features_all["g_" + stats] = getattr(df_features_all[GENES], stats)(axis=1)
+        df_features_all["c_" + stats] = getattr(df_features_all[CELLS], stats)(axis=1)
+        df_features_all["gc_" + stats] = getattr(df_features_all[GENES + CELLS], stats)(axis=1)
     return df_features_all
 
 
@@ -268,32 +314,51 @@ class MoaPreprocess:
 
         df_feature_all = pd.concat([self.df_x_train, self.df_x_test], ignore_index=True)
         # 处理
-        if preprocess_param['is_add_feature']:
+        if preprocess_param['is_add_square_feature']:
             # 添加高维特征(平方特征)
-            df_feature_all = add_square_features(df_feature_all, self.cols_feature_numeric)
-            print("add feature processing, after adding square features -- df shape: ", df_feature_all.shape)
+            df_feature_all = add_square_features(df_feature_all)
+            print("add feature processing; after adding square features -- df shape: ", df_feature_all.shape)
+        if preprocess_param['is_delete_feature']:
+            df_feature_all = delete_unimportant_features(df_feature_all)
+            print("delete feature processing; after adding square features -- df shape: ", df_feature_all.shape)
         if preprocess_param['is_gauss_rank']:
             # gauss rank将特征规范化
-            df_feature_all = gauss_rank(df_feature_all)
-            print("gauss rank processing")
+            df_feature_all = gauss_rank(df_feature_all, self.cols_feature_category)
+            print("gauss rank processing ; after gauss rank -- df shape: ", df_feature_all.shape)
         if preprocess_param['is_pca']:
             # 提取主成分，并将主成分加入特征
             df_feature_all, self.cols_feature_numeric = decompose_pca(df_feature_all, preprocess_param['n_gene_comp'],
                                                                       preprocess_param['n_cell_comp'],
                                                                       self.cols_feature_category, base_seed)
-            print("pca processing")
+            print("pca processing; after pca -- df shape: ", df_feature_all.shape)
+        if preprocess_param['is_svd']:
+            df_feature_all, self.cols_feature_numeric = decompose_svd(df_feature_all, preprocess_param['n_gene_comp'],
+                                                                      preprocess_param['n_cell_comp'],
+                                                                      self.cols_feature_category, base_seed)
+            print("SVD processing; after SVD -- df shape: ", df_feature_all.shape)
+
         if preprocess_param['is_filtered_by_var']:
             # 滤掉方差较小的特征
             df_feature_all, self.cols_feature_numeric = filter_feature_by_variance(df_feature_all,
                                                                                    self.cols_feature_category,
-                                                                                   self.cols_feature_numeric,
                                                                                    preprocess_param['variance_thresh'])
-            print("filtered by variance processing")
+            print("filtered by variance processing; after variance processing -- df shape: ", df_feature_all.shape)
+
+        # if preprocess_param['is_filtered_by_var2']:
+        #     df_feature_all, self.cols_feature_numeric = filter_feature_by_variance2(df_feature_all,
+        #                                                                             self.cols_feature_category,
+        #                                                                             preprocess_param['variance_thresh'])
+        #     print("filtered by variance processing2; after variance processing2 -- df shape: ", df_feature_all.shape)
+
+        if preprocess_param['is_add_statistic_feature']:
+            df_feature_all = generate_new_features(df_feature_all)
+            print("generate new features processing ; -- df shape: ", df_feature_all.shape)
+
         if preprocess_param['is_encoding']:
             # 编码类别型特征
             df_feature_all = encode_feature(df_features_all=df_feature_all, cols_features=self.cols_feature_category,
                                             encoding=preprocess_param['encoding'])
-            print("encoding processing")
+            print("encoding processing; after encoding processing -- df shape: ", df_feature_all.shape)
 
         x_train = df_feature_all[:self.num_train_samples]
         x_train.reset_index(drop=True, inplace=True)

@@ -1,5 +1,8 @@
 import sys
 
+from torch import optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 sys.path.append('../input/pytorch-tabnet')
 
 import numpy as np
@@ -7,15 +10,31 @@ import torch
 from pytorch_tabnet.metrics import Metric
 from pytorch_tabnet.tab_model import TabNetRegressor
 
+# tabnet_params = dict(
+#     n_d=24, n_a=24, n_steps=1, gamma=1.3,
+#     lambda_sparse=0, optimizer_fn=torch.optim.Adam,
+#     optimizer_params=dict(lr=2e-2, weight_decay=1e-5),
+#     mask_type='entmax',
+#     scheduler_fn=torch.optim.lr_scheduler.ReduceLROnPlateau,
+#     scheduler_params=dict(mode="min", patience=5, min_lr=1e-5, factor=0.9, ),
+#     # epoch打印间隔
+#     verbose=1
+# )
+
 tabnet_params = dict(
-    n_d=24, n_a=24, n_steps=1, gamma=1.3,
-    lambda_sparse=0, optimizer_fn=torch.optim.Adam,
+    n_d=32,
+    n_a=32,
+    n_steps=1,
+    gamma=1.3,
+    lambda_sparse=0,
+    optimizer_fn=optim.Adam,
     optimizer_params=dict(lr=2e-2, weight_decay=1e-5),
-    # mask_type='entmax',
-    scheduler_fn=torch.optim.lr_scheduler.ReduceLROnPlateau,
-    scheduler_params=dict(mode="min", patience=5, min_lr=1e-5, factor=0.9, ),
-    # epoch打印间隔
-    verbose=1
+    mask_type="entmax",
+    scheduler_params=dict(
+        mode="min", patience=5, min_lr=1e-5, factor=0.9),
+    scheduler_fn=ReduceLROnPlateau,
+    seed=42,
+    verbose=10
 )
 
 
