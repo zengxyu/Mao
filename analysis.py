@@ -5,7 +5,7 @@ import lightgbm as lgb
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.multiclass import OneVsRestClassifier
 import pickle
-from moa_preprocess import read_data
+from moa_pytorch_preprocess_helper import read_data
 from tqdm import tqdm
 import matplotlib.pylab as plt
 import seaborn as sns

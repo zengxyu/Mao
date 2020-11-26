@@ -5,8 +5,7 @@ import sys
 from sklearn.feature_selection import VarianceThreshold
 from tqdm import tqdm
 
-sys.path.append('../input/rankgauss')
-sys.path.append('../input/')
+sys.path.append('../input/rank-gauss')
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -14,7 +13,7 @@ from scipy import stats
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.preprocessing import LabelEncoder, QuantileTransformer
 
-from gauss_rank.gauss_rank_scaler import GaussRankScaler
+from gauss_rank_scaler import GaussRankScaler
 
 
 def read_data(root_dir):
@@ -33,9 +32,10 @@ def read_data(root_dir):
     del y_train['sig_id']
     del x_test['sig_id']
     del y_train_non_scored['sig_id']
+    # x_test = x_test[:int(0.1 * len(x_test))]
     y_train_with_non_scored = pd.concat([y_train, y_train_non_scored], axis=1)
     print("y_train shape:", y_train.shape)
-    print("y_train_non_scored:", y_train_non_scored.shape)
+    print("y_train_with_non_scored:", y_train_with_non_scored.shape)
     return x_train, y_train, y_train_with_non_scored, x_test
 
 
@@ -64,18 +64,8 @@ def drop_ctl_vehicle_samples_and_cols(df_x_train, df_y_train, df_y_train_with_no
     return df_x_train, df_y_train, df_y_train_with_non_scored, df_x_test
 
 
-def filter_feature_by_variance2(df_features_all, cols_feature_category, variance_threshould):
-    cols_numeric = [feat for feat in list(df_features_all.columns) if
-                    feat not in cols_feature_category]
-    mask = (df_features_all[cols_numeric].var() >= variance_threshould).values
-    tmp = df_features_all[cols_numeric].loc[:, mask]
-    df_features_all = pd.concat([df_features_all[cols_feature_category], tmp], axis=1)
-    cols_numeric = [feat for feat in list(df_features_all.columns) if
-                    feat not in cols_feature_category]
-    return df_features_all, cols_numeric
-
-
-def filter_feature_by_variance(df_features_all, cols_feature_category, variance_thresh):
+def filter_feature_by_variance(df_features_all, cols_feature_category, variance_thresh, is_train,
+                               out_tabnet_data_dir):
     """
     滤掉方差太小的特征
     :param df_features_all:
@@ -87,8 +77,12 @@ def filter_feature_by_variance(df_features_all, cols_feature_category, variance_
     cols_numeric = [feat for feat in list(df_features_all.columns) if
                     feat not in cols_feature_category]
 
-    var_thresh_selector = VarianceThreshold(variance_thresh)  # <-- Update
-    var_thresh_selector.fit(df_features_all[cols_numeric])
+    if is_train:
+        var_thresh_selector = VarianceThreshold(variance_thresh).fit(df_features_all[cols_numeric])
+        pickle.dump(var_thresh_selector, open(os.path.join(out_tabnet_data_dir, 'var_thresh_selector.pkl'), 'wb'))
+    else:
+        var_thresh_selector = pickle.load(open(os.path.join(out_tabnet_data_dir, 'var_thresh_selector.pkl'), 'rb'))
+        print("var_thresh_selector load from file")
 
     tmp = df_features_all[df_features_all.columns[var_thresh_selector.get_support(indices=True)]]
 
@@ -99,7 +93,8 @@ def filter_feature_by_variance(df_features_all, cols_feature_category, variance_
     return df_features_all, cols_feature_numeric
 
 
-def decompose_pca(df_features_all, n_gene_comp, n_cell_comp, cols_feature_category, base_seed):
+def decompose_pca(df_features_all, n_gene_comp, n_cell_comp, cols_feature_category, base_seed, is_train,
+                  out_tabnet_data_dir):
     """
     PCA提取主成分，并将提取的主成分加入到df_features_all
     :param df_features_all:
@@ -115,11 +110,18 @@ def decompose_pca(df_features_all, n_gene_comp, n_cell_comp, cols_feature_catego
 
     df_features_gene = pd.DataFrame(df_features_all[gene_cols])
     df_features_cell = pd.DataFrame(df_features_all[cell_cols])
+    if is_train:
+        gene_pca = PCA(n_components=n_gene_comp, random_state=base_seed).fit(df_features_gene[gene_cols])
+        cell_pca = PCA(n_components=n_cell_comp, random_state=base_seed).fit(df_features_cell[cell_cols])
+        pickle.dump(gene_pca, open(os.path.join(out_tabnet_data_dir, 'pca_g.pkl'), 'wb'))
+        pickle.dump(cell_pca, open(os.path.join(out_tabnet_data_dir, 'pca_c.pkl'), 'wb'))
+    else:
+        print("gene_pca,cell_pca load from file")
+        gene_pca = pickle.load(open(os.path.join(out_tabnet_data_dir, 'pca_g.pkl'), 'rb'))
+        cell_pca = pickle.load(open(os.path.join(out_tabnet_data_dir, 'pca_c.pkl'), 'rb'))
 
-    gene_pca = PCA(n_components=n_gene_comp, random_state=base_seed)
-    cell_pca = PCA(n_components=n_cell_comp, random_state=base_seed)
-    feature_gene_reduced = gene_pca.fit_transform(df_features_gene[gene_cols])
-    feature_cell_reduced = cell_pca.fit_transform(df_features_cell[cell_cols])
+    feature_gene_reduced = gene_pca.transform(df_features_gene[gene_cols])
+    feature_cell_reduced = cell_pca.transform(df_features_cell[cell_cols])
 
     df_feature_gene_reduced = pd.DataFrame(feature_gene_reduced,
                                            columns=['pca_g-{}'.format(col) for col in range(n_gene_comp)])
@@ -134,7 +136,8 @@ def decompose_pca(df_features_all, n_gene_comp, n_cell_comp, cols_feature_catego
     return df_features_all, cols_feature_numeric
 
 
-def decompose_svd(df_features_all, n_gene_comp, n_cell_comp, cols_feature_category, base_seed):
+def decompose_svd(df_features_all, n_gene_comp, n_cell_comp, cols_feature_category, base_seed, is_train,
+                  out_tabnet_data_dir):
     """
     SVD分解
     :param df_features_all:
@@ -145,10 +148,21 @@ def decompose_svd(df_features_all, n_gene_comp, n_cell_comp, cols_feature_catego
     """
     gene_cols = [col for col in df_features_all.columns if col.startswith('g-')]
     cell_cols = [col for col in df_features_all.columns if col.startswith('c-')]
-    svd_genes = TruncatedSVD(n_components=n_gene_comp, random_state=base_seed).fit_transform(df_features_all[gene_cols])
-    svd_cells = TruncatedSVD(n_components=n_cell_comp, random_state=base_seed).fit_transform(df_features_all[cell_cols])
-    svd_genes = pd.DataFrame(svd_genes, columns=[f'svd_g-{i}' for i in range(n_gene_comp)])
-    svd_cells = pd.DataFrame(svd_cells, columns=[f'svd_c-{i}' for i in range(n_cell_comp)])
+
+    if is_train:
+        svd_g = TruncatedSVD(n_components=n_gene_comp, random_state=base_seed).fit(df_features_all[gene_cols])
+        svd_c = TruncatedSVD(n_components=n_cell_comp, random_state=base_seed).fit(df_features_all[cell_cols])
+        pickle.dump(svd_g, open(os.path.join(out_tabnet_data_dir, 'svd_g.pkl'), 'wb'))
+        pickle.dump(svd_c, open(os.path.join(out_tabnet_data_dir, 'svd_c.pkl'), 'wb'))
+    else:
+        svd_g = pickle.load(open(os.path.join(out_tabnet_data_dir, 'svd_g.pkl'), 'rb'))
+        svd_c = pickle.load(open(os.path.join(out_tabnet_data_dir, 'svd_c.pkl'), 'rb'))
+        print("svd_g,svd_g load from file")
+
+    svd_genes = pd.DataFrame(svd_g.transform(df_features_all[gene_cols]),
+                             columns=[f'svd_g-{i}' for i in range(n_gene_comp)])
+    svd_cells = pd.DataFrame(svd_c.transform(df_features_all[cell_cols]),
+                             columns=[f'svd_c-{i}' for i in range(n_cell_comp)])
     df_features_all = pd.concat([df_features_all, svd_genes, svd_cells], axis=1)
     cols_feature_numeric = [feat for feat in list(df_features_all.columns) if
                             feat not in cols_feature_category]
@@ -245,10 +259,55 @@ def add_square_features(df_features_all):
     :param df_features_all:
     :return:
     """
+    """
+        添加高维度特征，（平方特征）
+        :param df_features_all:
+        :return:
+        """
     # 这四个特征是平方后，并使用lightgbm训练后，显示最重要的四个平方特征
+    gene_cols = [col for col in df_features_all.columns if col.startswith('g-')]
+    cell_cols = [col for col in df_features_all.columns if col.startswith('c-')]
+
+    print("generate new feature")
+    # 特征生成
+    for stats in ['sum', 'mean', 'std', 'kurt', 'skew']:
+        df_features_all['g_' + stats] = getattr(df_features_all[gene_cols], stats)(axis=1)
+        df_features_all['c_' + stats] = getattr(df_features_all[cell_cols], stats)(axis=1)
+        df_features_all['gc_' + stats] = getattr(df_features_all[gene_cols + cell_cols], stats)(axis=1)
+
+    df_features_all['c52_c42'] = df_features_all['c-52'] * df_features_all['c-42']
+    df_features_all['c13_c73'] = df_features_all['c-13'] * df_features_all['c-73']
+    df_features_all['c26_c13'] = df_features_all['c-23'] * df_features_all['c-13']
+    df_features_all['c33_c6'] = df_features_all['c-33'] * df_features_all['c-6']
+    df_features_all['c11_c55'] = df_features_all['c-11'] * df_features_all['c-55']
+    df_features_all['c38_c63'] = df_features_all['c-38'] * df_features_all['c-63']
+    df_features_all['c38_c94'] = df_features_all['c-38'] * df_features_all['c-94']
+    df_features_all['c13_c94'] = df_features_all['c-13'] * df_features_all['c-94']
+    df_features_all['c4_c52'] = df_features_all['c-4'] * df_features_all['c-52']
+    df_features_all['c4_c42'] = df_features_all['c-4'] * df_features_all['c-42']
+    df_features_all['c13_c38'] = df_features_all['c-13'] * df_features_all['c-38']
+    df_features_all['c55_c2'] = df_features_all['c-55'] * df_features_all['c-2']
+    df_features_all['c55_c4'] = df_features_all['c-55'] * df_features_all['c-4']
+    df_features_all['c4_c13'] = df_features_all['c-4'] * df_features_all['c-13']
+    df_features_all['c82_c42'] = df_features_all['c-82'] * df_features_all['c-42']
+    df_features_all['c66_c42'] = df_features_all['c-66'] * df_features_all['c-42']
+    df_features_all['c6_c38'] = df_features_all['c-6'] * df_features_all['c-38']
+    df_features_all['c2_c13'] = df_features_all['c-2'] * df_features_all['c-13']
+    df_features_all['c62_c42'] = df_features_all['c-62'] * df_features_all['c-42']
+    df_features_all['c90_c55'] = df_features_all['c-90'] * df_features_all['c-55']
+
     features_cols = ['g-7', 'g-91', 'g-100', 'g-130', 'g-175', 'g-300', 'g-608', 'c-98']
     for col in features_cols:
         df_features_all[col + "_square"] = df_features_all[col].apply(lambda a: a ** 2)
+
+    gsquarecols = ['g-574', 'g-211', 'g-216', 'g-0', 'g-255', 'g-577', 'g-153', 'g-389', 'g-60', 'g-370',
+                   'g-248', 'g-167', 'g-203', 'g-177', 'g-301', 'g-332', 'g-517', 'g-6', 'g-744', 'g-224',
+                   'g-162', 'g-3', 'g-736', 'g-486', 'g-283', 'g-22', 'g-359', 'g-361', 'g-440', 'g-335',
+                   'g-106', 'g-307', 'g-745', 'g-146', 'g-416', 'g-298', 'g-666', 'g-91', 'g-17', 'g-549',
+                   'g-145', 'g-157', 'g-768', 'g-568', 'g-396']
+    for feature in gsquarecols:
+        df_features_all[f'{feature}_squared'] = df_features_all[feature] ** 2
+
     return df_features_all
 
 
@@ -280,8 +339,18 @@ def generate_new_features(df_features_all):
     return df_features_all
 
 
-class MoaPreprocess:
-    def __init__(self, root_dir):
+class PytorchPreprocessHelper:
+    def __init__(self, root_dir, out_data_dir, is_train, read_directly):
+        self.out_pytorch_data_dir = out_data_dir
+        if not os.path.exists(self.out_pytorch_data_dir):
+            os.makedirs(self.out_pytorch_data_dir)
+
+        if read_directly:
+            print("read_directly")
+
+        self.is_train = is_train
+        self.read_directly = read_directly
+
         self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored, self.df_x_test = read_data(root_dir)
         self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored, self.df_x_test = \
             drop_ctl_vehicle_samples_and_cols(self.df_x_train, self.df_y_train, self.df_y_train_with_non_scored,
@@ -329,26 +398,26 @@ class MoaPreprocess:
             # 提取主成分，并将主成分加入特征
             df_feature_all, self.cols_feature_numeric = decompose_pca(df_feature_all, preprocess_param['n_gene_comp'],
                                                                       preprocess_param['n_cell_comp'],
-                                                                      self.cols_feature_category, base_seed)
+                                                                      self.cols_feature_category, base_seed,
+                                                                      is_train=self.is_train,
+                                                                      out_tabnet_data_dir=self.out_pytorch_data_dir)
             print("pca processing; after pca -- df shape: ", df_feature_all.shape)
         if preprocess_param['is_svd']:
             df_feature_all, self.cols_feature_numeric = decompose_svd(df_feature_all, preprocess_param['n_gene_comp'],
                                                                       preprocess_param['n_cell_comp'],
-                                                                      self.cols_feature_category, base_seed)
+                                                                      self.cols_feature_category, base_seed,
+                                                                      is_train=self.is_train,
+                                                                      out_tabnet_data_dir=self.out_pytorch_data_dir)
             print("SVD processing; after SVD -- df shape: ", df_feature_all.shape)
 
         if preprocess_param['is_filtered_by_var']:
             # 滤掉方差较小的特征
             df_feature_all, self.cols_feature_numeric = filter_feature_by_variance(df_feature_all,
                                                                                    self.cols_feature_category,
-                                                                                   preprocess_param['variance_thresh'])
+                                                                                   preprocess_param['variance_thresh'],
+                                                                                   is_train=self.is_train,
+                                                                                   out_tabnet_data_dir=self.out_pytorch_data_dir)
             print("filtered by variance processing; after variance processing -- df shape: ", df_feature_all.shape)
-
-        # if preprocess_param['is_filtered_by_var2']:
-        #     df_feature_all, self.cols_feature_numeric = filter_feature_by_variance2(df_feature_all,
-        #                                                                             self.cols_feature_category,
-        #                                                                             preprocess_param['variance_thresh'])
-        #     print("filtered by variance processing2; after variance processing2 -- df shape: ", df_feature_all.shape)
 
         if preprocess_param['is_add_statistic_feature']:
             df_feature_all = generate_new_features(df_feature_all)

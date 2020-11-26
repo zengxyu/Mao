@@ -1,4 +1,8 @@
 import copy
+import os
+import sys
+from collections import OrderedDict
+
 import numpy as np
 
 import torch
@@ -6,64 +10,161 @@ import torch.nn.functional as F
 from torch import nn, optim
 from torch.nn.modules.loss import _WeightedLoss
 
-from sklearn.multiclass import OneVsRestClassifier
-
 
 class PytorchModelHelper:
-    def __init__(self, device=None):
-        self.device = device
+    def __init__(self, kfold, param, xtrain, ytrain, ytrain_with_non_scored=None, xtest=None):
+        self.kfold = kfold
+        self.param = param
+        self.xtrain = xtrain
+        self.ytrain = ytrain
+        self.ytrain_with_non_scored = ytrain_with_non_scored
+        self.xtest = xtest
+        self.num_features = xtrain.shape[1]
+        self.num_labels = ytrain.shape[1]
+        self.num_all_labels = ytrain_with_non_scored.shape[1]
+        self.device = param['device']
 
         self.model = None
         self.optimizer = None
         self.scheduler = None
-        self.loss_fn = None
+        self.fine_tune_scheduler = None
+        self.loss_tr = SmoothBCEwLogits(smoothing=0.001)
+        self.loss_fn = nn.BCEWithLogitsLoss().to(self.device)
 
         self.train_loader = None
         self.val_loader = None
         self.test_loader = None
-        self.num_features = None
 
-    def fit_with_non_scored(self, model_name, data_with_non_scored, data, n_epochs=None, scheduler=None, patience=None,
-                            train_batch_size=None,
-                            val_batch_size=None):
-        # 预训练model3withnonscored模型
-        best_loss_pretrained, best_model_pretrained = self.fit(model_name + "withnonscored", data_with_non_scored,
-                                                               n_epochs,
-                                                               scheduler,
-                                                               patience,
-                                                               train_batch_size,
-                                                               val_batch_size)
-        # 加载预训练模型参数--前两层
-        pretrained_first_two_layers = {}
-        for k, v in best_model_pretrained.items():
-            if str(k).__contains__('1') or str(k).__contains__('2'):
-                pretrained_first_two_layers[k] = v
+    def train_models(self):
+        for n, (tr, te) in enumerate(self.kfold.split(self.ytrain, self.ytrain)):
+            print(f'###===============================Train fold {n + 1}===============================###')
+            x_train, x_val = self.xtrain[tr], self.xtrain[te]
+            y_train, y_val = self.ytrain[tr], self.ytrain[te]
+            y_train_with_non_scored, y_val_with_non_scored = self.ytrain_with_non_scored[tr], \
+                                                             self.ytrain_with_non_scored[te]
+            model_save_path = os.path.join(self.param['output'], self.param['model_save_name'].format(n + 1))
+
+            if 'is_transfer' in self.param.keys() and self.param['is_transfer']:
+                WEIGHT_DECAY = {'ALL_TARGETS': 1e-5, 'SCORED_ONLY': 3e-6}
+                MAX_LR = {'ALL_TARGETS': 1e-2, 'SCORED_ONLY': 3e-3}
+                # Train on scored + nonscored targets
+                best_loss, best_model = self.__fit(Model=self.param['model'],
+                                                   data=[x_train, y_train_with_non_scored, x_val,
+                                                         y_val_with_non_scored],
+                                                   num_labels=self.num_all_labels,
+                                                   hidden_sizes=self.param['hidden_sizes'],
+                                                   dropout_rates=self.param['dropout_rates'],
+                                                   lr=MAX_LR['ALL_TARGETS'],
+                                                   weight_decay=WEIGHT_DECAY['ALL_TARGETS'],
+                                                   n_epochs=self.param['n_epochs'],
+                                                   patience=self.param['patience'],
+                                                   train_batch_size=self.param[
+                                                       'train_batch_size'],
+                                                   val_batch_size=self.param[
+                                                       'val_batch_size'],
+                                                   )
+                print(
+                    "====================================迁移模型的学习=====================================================")
+
+                best_loss, best_model = self.__fit(Model=self.param['model'],
+                                                   data=[x_train, y_train, x_val,
+                                                         y_val],
+                                                   num_labels=self.num_labels,
+                                                   hidden_sizes=self.param['hidden_sizes'],
+                                                   dropout_rates=self.param['dropout_rates'],
+                                                   lr=MAX_LR['SCORED_ONLY'],
+                                                   weight_decay=WEIGHT_DECAY['SCORED_ONLY'],
+                                                   n_epochs=self.param['n_epochs'],
+                                                   patience=self.param['patience'],
+                                                   train_batch_size=self.param[
+                                                       'train_batch_size'],
+                                                   val_batch_size=self.param[
+                                                       'val_batch_size'],
+                                                   is_transfer=True,
+                                                   model_dict=best_model
+                                                   )
+            else:
+                best_loss, best_model = self.__fit(Model=self.param['model'],
+                                                   data=[x_train, y_train, x_val,
+                                                         y_val],
+                                                   num_labels=self.num_labels,
+                                                   hidden_sizes=self.param['hidden_sizes'],
+                                                   dropout_rates=self.param['dropout_rates'],
+                                                   lr=2e-2,
+                                                   weight_decay=1e-5,
+                                                   n_epochs=self.param['n_epochs'],
+                                                   patience=self.param['patience'],
+                                                   train_batch_size=self.param[
+                                                       'train_batch_size'],
+                                                   val_batch_size=self.param[
+                                                       'val_batch_size'],
+                                                   )
+
+            torch.save(best_model, model_save_path)
+
+            print("Fold : {} ; best loss : {}".format(n + 1, best_loss))
+
+    def test_models(self):
+        num_samples = self.xtest.shape[0]
+        total_test_preds = np.zeros((num_samples, self.num_labels, self.param['n_folds']))
+
+        for n in range(self.param['n_folds']):
+            print(f'Test fold {n + 1}')
+            model_save_path = os.path.join(self.param['output'], self.param['model_save_name'].format(n + 1))
+            test_pred_per_fold = self.__predict(model_name=self.param['model'],
+                                                num_labels=self.num_labels,
+                                                hidden_sizes=self.param['hidden_sizes'],
+                                                dropout_rates=self.param['dropout_rates'],
+                                                data=self.xtest,
+                                                test_batch_size=self.param[
+                                                    'test_batch_size'],
+                                                model_path=model_save_path)
+
+            total_test_preds[:, :, n] = test_pred_per_fold
+
+        total_test_preds = np.mean(total_test_preds, axis=2)
+        return total_test_preds
+
+    def __fit(self, Model, data, num_labels, hidden_sizes, dropout_rates, lr, weight_decay, n_epochs=None,
+              patience=None, train_batch_size=None,
+              val_batch_size=None, model_dict=None, model_path=None, is_transfer=False):
+
+        self.train_loader, self.val_loader = self.__train_data_factory(data=data,
+                                                                       train_batch_size=train_batch_size,
+                                                                       val_batch_size=val_batch_size)
+
+        if is_transfer:
+            self.fine_tune_scheduler = FineTuneScheduler(epochs=n_epochs)
+            print("n epoch:", n_epochs)
+            # Copy model without the top layer
+            self.model = self.fine_tune_scheduler.copy_without_top(self.param['model'], self.device,
+                                                                   model_dict,
+                                                                   self.num_features,
+                                                                   self.num_all_labels,
+                                                                   self.num_labels,
+                                                                   self.param['hidden_sizes'],
+                                                                   self.param['dropout_rates'], )
+            self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.1, patience=3,
+                                                                  eps=1e-4,
+                                                                  verbose=True)
+            print("=====================================================")
+            print("Model : {} ;".format(self.model.__class__.__name__))
+            print("Model net : {} ;".format(self.model))
+            print("Scheduler : {} ;".format(self.scheduler.__class__.__name__))
+            print("=====================================================")
+        else:
+            self.__init_model(Model=Model, num_labels=num_labels, hidden_sizes=hidden_sizes,
+                              dropout_rates=dropout_rates, lr=lr,
+                              weight_decay=weight_decay)
 
         best_loss = {'train': np.inf, 'val': np.inf}
         best_model = None
         early_step = 0
-        self.train_loader, self.val_loader, self.num_features = self.__train_data_factory(data=data,
-                                                                                          train_batch_size=train_batch_size,
-                                                                                          val_batch_size=val_batch_size)
-        self.__init_model(model_name=model_name, n_epochs=n_epochs, scheduler=scheduler,
-                          len_train_loader=len(self.train_loader))
-        model_dict = self.model.state_dict()
-        model_dict.update(pretrained_first_two_layers)
-        self.model.load_state_dict(model_dict)
-        # 固定前一层参数
-        # 用后两层参数训练
-        # for name, param in self.model.named_parameters():
-        #     print('param.name:', name)
-        #     if str(name).__contains__('1'):
-        #         param.requires_grad = False
-        #     else:
-        #         param.requires_grad = True
-        # 检查参数
-        print("Check whether parameters fixed")
-        for k, v in self.model.named_parameters():
-            print(k, ";", v.requires_grad)
-
         for epoch in range(n_epochs):
+            # if is_transfer:
+            #     self.fine_tune_scheduler.step(epoch, self.model)
+
             train_loss = self.__train()
             val_loss = self.__val()
             epoch_loss = {'train': train_loss, 'val': val_loss}
@@ -84,89 +185,39 @@ class PytorchModelHelper:
 
         return best_loss, best_model
 
-    def fit_and_save(self, model_name, data, n_epochs=None, scheduler=None, patience=None, train_batch_size=None,
-                     val_batch_size=None, model_save_path=None):
-        best_loss = {'train': np.inf, 'val': np.inf}
-        best_model = None
-        early_step = 0
-        self.train_loader, self.val_loader, self.num_features = self.__train_data_factory(data=data,
-                                                                                          train_batch_size=train_batch_size,
-                                                                                          val_batch_size=val_batch_size)
-        self.__init_model(model_name=model_name, n_epochs=n_epochs, scheduler=scheduler,
-                          len_train_loader=len(self.train_loader))
-
-        for epoch in range(n_epochs):
-            train_loss = self.__train()
-            val_loss = self.__val()
-            epoch_loss = {'train': train_loss, 'val': val_loss}
-            print("Epoch {}/{}   -   loss: {:5.5f}   -   val_loss: {:5.5f}".format(epoch + 1, n_epochs,
-                                                                                   epoch_loss['train'],
-                                                                                   epoch_loss['val']))
-
-            self.scheduler.step(epoch_loss['val'])
-
-            if epoch_loss['val'] < best_loss['val']:
-                best_loss = epoch_loss
-                best_model = copy.deepcopy(self.model.state_dict())
-                early_step = 0
-            elif patience is not None:
-                early_step += 1
-                if early_step >= patience:
-                    break
-        torch.save(best_model, model_save_path)
-
-        return best_loss
-
-    def predict(self, model_name, data, test_batch_size, model_path):
-        self.test_loader, self.num_features = self.__test_data_factory(data=data, test_batch_size=test_batch_size)
-        self.__init_model(model_name=model_name)
-        self.__resume_model(model_path=model_path)
-
+    def __predict(self, model_name, num_labels, hidden_sizes, dropout_rates, data, test_batch_size, model_path):
+        self.test_loader = self.__test_data_factory(data=data, test_batch_size=test_batch_size)
+        self.__init_model(Model=model_name, num_labels=num_labels, hidden_sizes=hidden_sizes,
+                          dropout_rates=dropout_rates, model_path=model_path)
         test_pred = self.__test()
 
         return test_pred
 
-    def __init_model(self, model_name, n_epochs=None, scheduler=None, len_train_loader=None):
+    def __init_model(self, Model, num_labels, hidden_sizes, dropout_rates, lr=2e-2, weight_decay=1e-5, model_dict=None,
+                     model_path=None):
+        self.model = Model(self.num_features, num_labels, hidden_sizes, dropout_rates).to(self.device)
+        # 如果有模型就加载模型
+        if model_dict is not None:
+            self.model.load_state_dict(model_dict)
+            print("Load the model with state dict")
 
-        if model_name == "model1":
-            self.model = Model(self.num_features).to(self.device)
-        elif model_name == 'model2':
-            self.model = Model2(self.num_features).to(self.device)
-        elif model_name == 'model3':
-            self.model = Model3(self.num_features).to(self.device)
-        elif model_name == "model3withnonscored":
-            self.model = Model3WithNonScored(self.num_features).to(self.device)
-        elif model_name == 'model4':
-            self.model = Model4(self.num_features).to(self.device)
-        elif model_name == "model4withnonscored":
-            self.model = Model4WithNonScored(self.num_features).to(self.device)
+        elif model_path is not None:
+            print("Load the model with model path")
+            self.model.load_state_dict(torch.load(model_path))
+
         else:
-            raise NotImplementedError
+            print("Load the model with nothing, this is a new model")
 
-        if scheduler == "pla":
-            self.optimizer = optim.Adam(self.model.parameters(), lr=2e-2, weight_decay=1e-5)
-            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.1, patience=3,
-                                                                  eps=1e-4,
-                                                                  verbose=True)
-        elif scheduler == 'cycle':
-            self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3, weight_decay=1e-5)
-            self.scheduler = optim.lr_scheduler.OneCycleLR(optimizer=self.optimizer, pct_start=0.1, div_factor=1e3,
-                                                           max_lr=1e-2, epochs=n_epochs,
-                                                           steps_per_epoch=len_train_loader)
-        print(len_train_loader)
-        self.loss_fn = nn.BCEWithLogitsLoss().to(self.device)
-        self.loss_tr = SmoothBCEwLogits(smoothing=0.001)
-        print("Model name : {} ;".format(self.model.__class__.__name__))
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.1, patience=3,
+                                                              eps=1e-4,
+                                                              verbose=True)
+
+        print("=====================================================")
+        print("Model : {} ;".format(self.model.__class__.__name__))
         print("Model net : {} ;".format(self.model))
         print("Scheduler : {} ;".format(self.scheduler.__class__.__name__))
-
-    def __resume_model(self, model_path=None, model_state_dict=None):
-        if model_path is not None:
-            self.model.load_state_dict(torch.load(model_path))
-        elif model_state_dict is not None:
-            self.model.load_state_dict(model_state_dict)
-        else:
-            print("please provide a model ''!")
+        print("=====================================================")
 
     def __train(self):
         self.model.train()
@@ -217,16 +268,14 @@ class PytorchModelHelper:
                                                    shuffle=True)
         val_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=val_batch_size,
                                                  shuffle=False)
-        num_features = x_train.shape[1]
-        return train_loader, val_loader, num_features
+        return train_loader, val_loader,
 
     def __test_data_factory(self, data, test_batch_size):
         x_test = data
         test_dataset = TestDataset(x_test)
         test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=test_batch_size,
                                                   shuffle=False)
-        num_features = x_test.shape[1]
-        return test_loader, num_features
+        return test_loader
 
 
 class TrainDataset:
@@ -253,203 +302,100 @@ class TestDataset:
         return len(self.features)
 
 
-class Model(nn.Module):
-    def __init__(self, num_features):
-        super(Model, self).__init__()
-        self.batch_norm1 = nn.BatchNorm1d(num_features)
-        self.dropout1 = nn.Dropout(0.2)
-        self.dense1 = nn.utils.weight_norm(nn.Linear(num_features, 2048))
+class ModelMlp(nn.Module):
+    def __init__(self, num_features, n_targets=206, hidden_sizes=None, dropout_rates=None):
+        super(ModelMlp, self).__init__()
+        self.hidden_sizes = hidden_sizes
+        self.dropout_rates = dropout_rates
 
-        self.batch_norm2 = nn.BatchNorm1d(2048)
-        self.dropout2 = nn.Dropout(0.5)
-        self.dense2 = nn.utils.weight_norm(nn.Linear(2048, 1024))
+        arr = []
+        for i in range(len(hidden_sizes)):
+            if i == 0:
+                # input layer
+                arr.append((f'batch_norm{i + 1}', nn.BatchNorm1d(num_features)))
+                arr.append((f'dense{i + 1}', nn.utils.weight_norm(nn.Linear(num_features, hidden_sizes[i]))))
+                arr.append((f'activation{i + 1}', nn.modules.LeakyReLU()))
 
-        self.batch_norm3 = nn.BatchNorm1d(1024)
-        self.dropout3 = nn.Dropout(0.5)
-        self.dense3 = nn.utils.weight_norm(nn.Linear(1024, 206))
+            else:
+                # hidden layer
+                arr.append((f'batch_norm{i + 1}', nn.BatchNorm1d(hidden_sizes[i - 1])))
+                arr.append((f'dropout{i + 1}', nn.Dropout(self.get_dropout_rate(dropout_rates, i - 1))))
+                arr.append((f'dense{i + 1}', nn.utils.weight_norm(nn.Linear(hidden_sizes[i - 1], hidden_sizes[i]))))
+                arr.append((f'activation{i + 1}', nn.modules.LeakyReLU()))
+        # output layer
+        i = len(hidden_sizes)
+        arr.append((f'batch_norm{i + 1}', nn.BatchNorm1d(hidden_sizes[i - 1])))
+        arr.append((f'dropout{i + 1}', nn.Dropout(self.get_dropout_rate(dropout_rates, i - 1))))
+        arr.append((f'dense{i + 1}', nn.utils.weight_norm(nn.Linear(hidden_sizes[i - 1], n_targets))))
 
-    def forward(self, x):
-        x = self.batch_norm1(x)
-        x = self.dropout1(x)
-        x = F.relu(self.dense1(x))
-
-        x = self.batch_norm2(x)
-        x = self.dropout2(x)
-        x = F.relu(self.dense2(x))
-
-        x = self.batch_norm3(x)
-        x = self.dropout3(x)
-        x = self.dense3(x)
-
-        return x
-
-
-class Model2(nn.Module):
-    def __init__(self, num_features):
-        hidden_size = 512
-        super(Model2, self).__init__()
-        self.batch_norm1 = nn.BatchNorm1d(num_features)
-        self.dropout1 = nn.Dropout(0.2)
-        self.dense1 = nn.utils.weight_norm(nn.Linear(num_features, hidden_size))
-
-        self.batch_norm2 = nn.BatchNorm1d(hidden_size)
-        self.dropout2 = nn.Dropout(0.2)
-        self.dense2 = nn.utils.weight_norm(nn.Linear(hidden_size, hidden_size))
-
-        self.batch_norm3 = nn.BatchNorm1d(hidden_size)
-        self.dropout3 = nn.Dropout(0.25)
-        self.dense3 = nn.utils.weight_norm(nn.Linear(hidden_size, 206))
+        self.sequential = nn.Sequential(OrderedDict(arr))
 
     def forward(self, x):
-        x = self.batch_norm1(x)
-        x = self.dropout1(x)
-        x = F.relu(self.dense1(x))
-
-        x = self.batch_norm2(x)
-        x = self.dropout2(x)
-        x = F.relu(self.dense2(x))
-
-        x = self.batch_norm3(x)
-        x = self.dropout3(x)
-        x = self.dense3(x)
-
+        x = self.sequential(x)
         return x
 
-
-class Model3(nn.Module):
-    def __init__(self, num_features):
-        super(Model3, self).__init__()
-        hidden_size = 1500
-        self.batch_norm1 = nn.BatchNorm1d(num_features)
-        self.dense1 = nn.utils.weight_norm(nn.Linear(num_features, hidden_size))
-
-        self.batch_norm2 = nn.BatchNorm1d(hidden_size)
-        self.dropout2 = nn.Dropout(0.2619422201258426)
-        self.dense2 = nn.utils.weight_norm(nn.Linear(hidden_size, hidden_size))
-
-        self.batch_norm3 = nn.BatchNorm1d(hidden_size)
-        self.dropout3 = nn.Dropout(0.2619422201258426)
-        self.dense3 = nn.utils.weight_norm(nn.Linear(hidden_size, 206))
-
-    def forward(self, x):
-        x = self.batch_norm1(x)
-        x = F.leaky_relu(self.dense1(x))
-
-        x = self.batch_norm2(x)
-        x = self.dropout2(x)
-        x = F.leaky_relu(self.dense2(x))
-
-        x = self.batch_norm3(x)
-        x = self.dropout3(x)
-        x = self.dense3(x)
-
-        return x
+    def get_dropout_rate(self, dropout_rates, i):
+        if isinstance(dropout_rates, list):
+            if i >= len(dropout_rates):
+                return dropout_rates[len(dropout_rates) - 1]
+            else:
+                return dropout_rates[i]
+        else:
+            return dropout_rates
 
 
-class Model3WithNonScored(nn.Module):
-    def __init__(self, num_features):
-        super(Model3WithNonScored, self).__init__()
-        hidden_size = 1500
-        self.batch_norm1 = nn.BatchNorm1d(num_features)
-        self.dense1 = nn.utils.weight_norm(nn.Linear(num_features, hidden_size))
+class FineTuneScheduler:
+    def __init__(self, epochs):
+        self.epochs = epochs
+        self.epochs_per_step = 0
+        self.frozen_layers = []
 
-        self.batch_norm2 = nn.BatchNorm1d(hidden_size)
-        self.dropout2 = nn.Dropout(0.2619422201258426)
-        self.dense2 = nn.utils.weight_norm(nn.Linear(hidden_size, hidden_size))
+    def copy_without_top(self, Model, device, model_dict, num_features, num_all_labels, num_labels, hidden_sizes,
+                         dropout_rates):
+        self.frozen_layers = []
+        model_new = Model(num_features, num_all_labels, hidden_sizes, dropout_rates)
+        model_new.load_state_dict(model_dict)
 
-        self.batch_norm3 = nn.BatchNorm1d(hidden_size)
-        self.dropout3 = nn.Dropout(0.2619422201258426)
-        self.dense3 = nn.utils.weight_norm(nn.Linear(hidden_size, 608))
+        model_depth = len(model_new.hidden_sizes) + 1
+        # Freeze all weights
+        for name, param in model_new.named_parameters():
+            layer_index = name.split('.')[1][-1]
 
-    def forward(self, x):
-        x = self.batch_norm1(x)
-        x = F.leaky_relu(self.dense1(x))
+            if layer_index == model_depth:
+                continue
 
-        x = self.batch_norm2(x)
-        x = self.dropout2(x)
-        x = F.leaky_relu(self.dense2(x))
+            param.requires_grad = False
 
-        x = self.batch_norm3(x)
-        x = self.dropout3(x)
-        x = self.dense3(x)
+            # Save frozen layer names
+            if layer_index not in self.frozen_layers:
+                self.frozen_layers.append(layer_index)
 
-        return x
+        self.epochs_per_step = self.epochs // len(self.frozen_layers)
 
+        # Replace the top layers with another ones
+        model_new.sequential[-3] = nn.BatchNorm1d(model_new.hidden_sizes[-1])
+        model_new.sequential[-2] = nn.Dropout(
+            model_new.get_dropout_rate(model_new.dropout_rates, model_depth - 2))
+        model_new.sequential[-1] = nn.utils.weight_norm(
+            nn.Linear(model_new.hidden_sizes[-1], num_labels))
+        model_new.to(device)
+        return model_new
 
-class Model4(nn.Module):
-    def __init__(self, num_features):
-        super(Model4, self).__init__()
-        hidden_size = 1500
-        self.batch_norm1 = nn.BatchNorm1d(num_features)
-        self.dense1 = nn.utils.weight_norm(nn.Linear(num_features, 2048))
+    def step(self, epoch, model):
+        if len(self.frozen_layers) == 0:
+            return
 
-        self.batch_norm2 = nn.BatchNorm1d(2048)
-        self.dropout2 = nn.Dropout(0.34)
-        self.dense2 = nn.utils.weight_norm(nn.Linear(2048, hidden_size))
+        if epoch % 30 == 0:
+            last_frozen_index = self.frozen_layers[-1]
 
-        self.batch_norm3 = nn.BatchNorm1d(hidden_size)
-        self.dropout3 = nn.Dropout(0.2619422201258426)
-        self.dense3 = nn.utils.weight_norm(nn.Linear(hidden_size, hidden_size))
+            # Unfreeze parameters of the last frozen layer
+            for name, param in model.named_parameters():
+                layer_index = name.split('.')[0][-1]
 
-        self.batch_norm4 = nn.BatchNorm1d(hidden_size)
-        self.dropout4 = nn.Dropout(0.2619422201258426)
-        self.dense4 = nn.utils.weight_norm(nn.Linear(hidden_size, 206))
+                if layer_index == last_frozen_index:
+                    param.requires_grad = True
 
-    def forward(self, x):
-        x = self.batch_norm1(x)
-        x = F.leaky_relu(self.dense1(x))
-
-        x = self.batch_norm2(x)
-        x = self.dropout2(x)
-        x = F.leaky_relu(self.dense2(x))
-
-        x = self.batch_norm3(x)
-        x = self.dropout3(x)
-        x = self.dense3(x)
-
-        x = self.batch_norm4(x)
-        x = self.dropout4(x)
-        x = self.dense4(x)
-
-        return x
-
-
-class Model4WithNonScored(nn.Module):
-    def __init__(self, num_features):
-        super(Model4WithNonScored, self).__init__()
-        hidden_size = 1500
-        self.batch_norm1 = nn.BatchNorm1d(num_features)
-        self.dense1 = nn.utils.weight_norm(nn.Linear(num_features, 2048))
-
-        self.batch_norm2 = nn.BatchNorm1d(2048)
-        self.dropout2 = nn.Dropout(0.34)
-        self.dense2 = nn.utils.weight_norm(nn.Linear(2048, hidden_size))
-
-        self.batch_norm3 = nn.BatchNorm1d(hidden_size)
-        self.dropout3 = nn.Dropout(0.2619422201258426)
-        self.dense3 = nn.utils.weight_norm(nn.Linear(hidden_size, hidden_size))
-
-        self.batch_norm4 = nn.BatchNorm1d(hidden_size)
-        self.dropout4 = nn.Dropout(0.2619422201258426)
-        self.dense4 = nn.utils.weight_norm(nn.Linear(hidden_size, 608))
-
-    def forward(self, x):
-        x = self.batch_norm1(x)
-        x = F.leaky_relu(self.dense1(x))
-
-        x = self.batch_norm2(x)
-        x = self.dropout2(x)
-        x = F.leaky_relu(self.dense2(x))
-
-        x = self.batch_norm3(x)
-        x = self.dropout3(x)
-        x = self.dense3(x)
-
-        x = self.batch_norm4(x)
-        x = self.dropout4(x)
-        x = self.dense4(x)
-
-        return x
+            del self.frozen_layers[-1]  # Remove the last layer as unfrozen
 
 
 class SmoothBCEwLogits(_WeightedLoss):
@@ -462,8 +408,10 @@ class SmoothBCEwLogits(_WeightedLoss):
     @staticmethod
     def _smooth(targets: torch.Tensor, n_labels: int, smoothing=0.0):
         assert 0 <= smoothing < 1
+
         with torch.no_grad():
             targets = targets * (1.0 - smoothing) + 0.5 * smoothing
+
         return targets
 
     def forward(self, inputs, targets):
