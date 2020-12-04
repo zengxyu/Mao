@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 
 class TabnetModelHelper:
-    def __init__(self, kfold, param, xtrain, ytrain, ytrain_with_non_scored=None, xtest=None):
+    def __init__(self, kfold, param, xtrain, ytrain, ytrain_with_non_scored=None, xtest=None, verbose=False):
         self.kfold = kfold
         self.param = param
         self.xtrain = xtrain
@@ -28,6 +28,7 @@ class TabnetModelHelper:
         self.device = param['device']
         self.loss_fn = SmoothBCEwLogits(smoothing=5e-5)
         self.model = None
+        self.verbose = verbose
 
     def train_models(self):
         best_val_losses = []
@@ -49,8 +50,16 @@ class TabnetModelHelper:
             self.model.save_model(model_save_path)
         return best_val_losses
 
-    def test_models(self):
-        num_samples = self.xtest.shape[0]
+    def test_models(self, is_predict_train_data=False):
+        if self.verbose:
+            print('###==============Test model for {}===============###'.format(
+                "train data" if is_predict_train_data else "test data"))
+        if is_predict_train_data:
+            xtest = self.xtrain
+        else:
+            xtest = self.xtest
+
+        num_samples = xtest.shape[0]
         total_test_preds = np.zeros((num_samples, self.num_labels, self.param['n_folds']))
 
         for n in range(self.param['n_folds']):
@@ -61,9 +70,9 @@ class TabnetModelHelper:
                 model_save_path = os.path.join(self.param['output'], self.param['model_save_name'].format(n + 1))
                 shutil.make_archive(model_save_path, "zip", path)
                 model_save_path += '.zip'
-
-            print("Predicting---load model from {}".format(model_save_path))
-            test_pred_per_fold = self.__predict(self.xtest, model_save_path)
+            if self.verbose:
+                print("Predicting---load model from {}".format(model_save_path))
+            test_pred_per_fold = self.__predict(xtest, model_save_path)
 
             total_test_preds[:, :, n] = test_pred_per_fold
 
@@ -95,7 +104,7 @@ class TabnetModelHelper:
             )
         elif param_id == 1:
             tabnet_params = dict(
-                n_d=32, n_a=32, n_steps=1, gamma=1.3, seed=42,
+                n_d=32, n_a=32, n_steps=1, gamma=1.3, seed=20,
                 lambda_sparse=0, optimizer_fn=torch.optim.Adam,
                 optimizer_params=dict(lr=2e-2, weight_decay=1e-5),
                 mask_type='entmax',
@@ -106,9 +115,9 @@ class TabnetModelHelper:
             )
         elif param_id == 2:
             tabnet_params = dict(
-                n_d=32, n_a=256, n_steps=1, gamma=1.3, seed=42,
-                lambda_sparse=0, n_shared=1, n_independent=1, optimizer_fn=torch.optim.Adam,
-                optimizer_params=dict(lr=2e-2, weight_decay=1e-5),
+                n_d=24, n_a=256, n_steps=1, gamma=1.3, seed=21,
+                lambda_sparse=0, optimizer_fn=torch.optim.Adam,
+                optimizer_params=dict(lr=2e-2, weight_decay=1e-6),
                 mask_type='entmax',
                 scheduler_fn=torch.optim.lr_scheduler.ReduceLROnPlateau,
                 scheduler_params=dict(mode="min", patience=5, min_lr=1e-5, factor=0.9, ),

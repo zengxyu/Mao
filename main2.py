@@ -17,27 +17,25 @@ from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 from moa_pytorch_model_helper import PytorchModelHelper, ModelMlp
 from moa_tabnet_model_helper import TabnetModelHelper
-from moa_pytorch_preprocess_helper import PytorchPreprocessHelper
+from moa_pytorch_preprocess_helper_WX import PytorchPreprocessHelper
 from moa_tabnet_preprocess_helper import TabnetPreprocessHelper
 from util import seed_everything, write_result, write_val_result, print_seperater, calculate_overall_loss
 import pandas as pd
 
 import warnings
 
-""""
-没有聚类
 """
-
+没有聚类， weight decay = 1e-6
+"""
 warnings.filterwarnings('ignore')
-base_seed = 42
 param = {
     'root_dir': "../input",
     'model': None,
     'device': torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
-    'output_root_dir': "output",
+    'output_root_dir': "output2",
     'output': "",
     'model_save_name': "model_{}.pth",
-    'base_seed': base_seed,
+    'base_seed': 2020,
     'n_folds': 10,
     'n_epochs': 150,
     'patience': 10,
@@ -47,11 +45,10 @@ param = {
 
     'out_data_dir': 'out_tabnet_data_dir',
 
-    'read_directly': True,
+    'read_directly': False,
 
     'is_train_data': False,
     'is_train_model': False,
-
     'compute_val_loss_only': False
 
 }
@@ -109,47 +106,57 @@ tabnet_preprocess_param1 = {
 model_config = [
     ["py_model_4_1500_1250_1000_750", PytorchModelHelper, ModelMlp,
      {"is_transfer": True, "hidden_sizes": [1500, 1250, 1000, 750], "dropout_rates": [0.5, 0.35, 0.3, 0.25],
-      },
+      "base_seed": 42},
      PytorchPreprocessHelper, pytorch_preprocess_param, 1],
-    #
+
     ["py_model_3_1500_1024_750", PytorchModelHelper, ModelMlp,
      {"is_transfer": True, "hidden_sizes": [1500, 1024, 750], "dropout_rates": [0.5, 0.35, 0.25],
-      },
+      "base_seed": 2020},
      PytorchPreprocessHelper, pytorch_preprocess_param, 1],
 
     ["py_model_3_1280_960_720", PytorchModelHelper, ModelMlp,
      {"is_transfer": True, "hidden_sizes": [1280, 960, 720], "dropout_rates": [0.4, 0.3, 0.18],
-      },
+      "base_seed": 57},
      PytorchPreprocessHelper, pytorch_preprocess_param, 1],
-    #
+
     ["py_model_2_1500_1500", PytorchModelHelper, ModelMlp,
      {"is_transfer": True, "hidden_sizes": [1500, 1500], "dropout_rates": [0.2619422201258426, 0.2619422201258426],
-      },
-     PytorchPreprocessHelper, pytorch_preprocess_param, 0.8],
+      "base_seed": 2021},
+     PytorchPreprocessHelper, pytorch_preprocess_param, 1],
 
     ["py_model_2_1280_1280", PytorchModelHelper, ModelMlp,
      {"is_transfer": True, "hidden_sizes": [1280, 1280], "dropout_rates": 0.21,
-      },
+      "base_seed": 1995},
      PytorchPreprocessHelper, pytorch_preprocess_param, 1],
 
     ["py_model_2_1024_1024", PytorchModelHelper, ModelMlp,
      {"is_transfer": True, "hidden_sizes": [1024, 1024], "dropout_rates": 0.18,
-      },
-     PytorchPreprocessHelper, pytorch_preprocess_param, 2],
+      "base_seed": 51},
+     PytorchPreprocessHelper, pytorch_preprocess_param, 1],
 
     ["py_model_2_720_720", PytorchModelHelper, ModelMlp,
      {"is_transfer": True, "hidden_sizes": [720, 720], "dropout_rates": 0.1,
-      },
-     PytorchPreprocessHelper, pytorch_preprocess_param, 0.5],
+      "base_seed": 49},
+     PytorchPreprocessHelper, pytorch_preprocess_param, 1],
 
-    ["tb_model_1", TabnetModelHelper, 'Tabnet', {"param_id": 1, }, TabnetPreprocessHelper, None, 1],
+    # ["py_model_1_2048", PytorchModelHelper, ModelMlp,
+    #  {"is_transfer": False, "hidden_sizes": [2048], "dropout_rates": [0.2619422201258426], "base_seed": 12},
+    #  PytorchPreprocessHelper, pytorch_preprocess_param],
 
-    ["tb_model_2", TabnetModelHelper, 'Tabnet', {"param_id": 2, }, TabnetPreprocessHelper, None, 1],
+    # ["tb_model_0", TabnetModelHelper, 'Tabnet', {"param_id": 0, "base_seed": 78}, PytorchPreprocessHelper,
+    #  tabnet_preprocess_param1],
 
+    ["tb_model_1", TabnetModelHelper, 'Tabnet', {"param_id": 1, "base_seed": 76}, TabnetPreprocessHelper, None, 1],
+
+    ["tb_model_2", TabnetModelHelper, 'Tabnet', {"param_id": 2, "base_seed": 53}, TabnetPreprocessHelper, None, 1],
+
+    # ["tb_model_3", TabnetModelHelper, 'Tabnet', {"param_id": 3, "base_seed": 3000}, TabnetPreprocessHelper, None],
 ]
 
 
 def train_test_once(ModelHelper, PreprocessHelper, preprocess_param):
+    seed_everything(param['base_seed'])
+
     if not os.path.exists(param['output']):
         os.makedirs(param['output'])
 
@@ -224,7 +231,7 @@ def train_test_all():
 
         # 把train数据的预测结果写到文件中
         overall_val_loss = write_val_result(total_train_preds, root_dir=param['root_dir'], output_dir=param['output'])
-        model_val_loss_dict[prefix_name] = overall_val_loss
+        model_val_loss_dict[prefix_name] = [overall_val_loss, weight]
 
         # 将每次预测后的结果加到list中
         preds_test_on_all_models.append(total_test_preds)
@@ -257,8 +264,6 @@ def average(preds_test_on_all_models, model_val_loss_dict):
 
 
 if __name__ == '__main__':
-    seed_everything(param['base_seed'])
-
     # copy models to work directory
     input_model_dir = "../input/data-and-model"
     if not os.path.exists(param['output_root_dir']):

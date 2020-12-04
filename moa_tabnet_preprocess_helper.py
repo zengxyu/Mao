@@ -234,7 +234,6 @@ class TabnetPreprocessHelper:
         if self.read_directly:
             train, target, df_y_train_with_non_scored, test, feature_cols, target_cols = pickle.load(
                 open(os.path.join(self.out_tabnet_data_dir, 'data_tabnet.pkl'), 'rb'))
-            print("read_directly")
         else:
             df_x_train, df_y_train, df_y_train_with_non_scored, df_x_test = read_data(self.root_dir)
             train_features2, test_features2 = df_x_train.copy(), df_x_test.copy()

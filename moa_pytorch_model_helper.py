@@ -12,7 +12,7 @@ from torch.nn.modules.loss import _WeightedLoss
 
 
 class PytorchModelHelper:
-    def __init__(self, kfold, param, xtrain, ytrain, ytrain_with_non_scored=None, xtest=None):
+    def __init__(self, kfold, param, xtrain, ytrain, ytrain_with_non_scored=None, xtest=None, verbose=False):
         self.kfold = kfold
         self.param = param
         self.xtrain = xtrain
@@ -34,6 +34,7 @@ class PytorchModelHelper:
         self.train_loader = None
         self.val_loader = None
         self.test_loader = None
+        self.verbose = verbose
 
     def train_models(self):
         for n, (tr, te) in enumerate(self.kfold.split(self.ytrain, self.ytrain)):
@@ -57,7 +58,7 @@ class PytorchModelHelper:
                                                    lr=MAX_LR['ALL_TARGETS'],
                                                    weight_decay=WEIGHT_DECAY['ALL_TARGETS'],
                                                    n_epochs=self.param['n_epochs'],
-                                                   patience=self.param['patience'],
+                                                   patience=5,
                                                    train_batch_size=self.param[
                                                        'train_batch_size'],
                                                    val_batch_size=self.param[
@@ -104,18 +105,29 @@ class PytorchModelHelper:
 
             print("Fold : {} ; best loss : {}".format(n + 1, best_loss))
 
-    def test_models(self):
-        num_samples = self.xtest.shape[0]
+    def test_models(self, is_predict_train_data=False):
+        if self.verbose:
+            print('###==============Test model for {}===============###'.format(
+                "train data" if is_predict_train_data else "test data"))
+
+        if is_predict_train_data:
+            xtest = self.xtrain
+        else:
+            xtest = self.xtest
+
+        num_samples = xtest.shape[0]
         total_test_preds = np.zeros((num_samples, self.num_labels, self.param['n_folds']))
 
         for n in range(self.param['n_folds']):
-            print(f'Test fold {n + 1}')
+            if self.verbose:
+                print(f'Test fold {n + 1}')
             model_save_path = os.path.join(self.param['output'], self.param['model_save_name'].format(n + 1))
+
             test_pred_per_fold = self.__predict(model_name=self.param['model'],
                                                 num_labels=self.num_labels,
                                                 hidden_sizes=self.param['hidden_sizes'],
                                                 dropout_rates=self.param['dropout_rates'],
-                                                data=self.xtest,
+                                                data=xtest,
                                                 test_batch_size=self.param[
                                                     'test_batch_size'],
                                                 model_path=model_save_path)
@@ -135,7 +147,6 @@ class PytorchModelHelper:
 
         if is_transfer:
             self.fine_tune_scheduler = FineTuneScheduler(epochs=n_epochs)
-            print("n epoch:", n_epochs)
             # Copy model without the top layer
             self.model = self.fine_tune_scheduler.copy_without_top(self.param['model'], self.device,
                                                                    model_dict,
@@ -148,11 +159,12 @@ class PytorchModelHelper:
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.1, patience=3,
                                                                   eps=1e-4,
                                                                   verbose=True)
-            print("=====================================================")
-            print("Model : {} ;".format(self.model.__class__.__name__))
-            print("Model net : {} ;".format(self.model))
-            print("Scheduler : {} ;".format(self.scheduler.__class__.__name__))
-            print("=====================================================")
+            if self.verbose:
+                print("=====================================================")
+                print("Model : {} ;".format(self.model.__class__.__name__))
+                print("Model net : {} ;".format(self.model))
+                print("Scheduler : {} ;".format(self.scheduler.__class__.__name__))
+                print("=====================================================")
         else:
             self.__init_model(Model=Model, num_labels=num_labels, hidden_sizes=hidden_sizes,
                               dropout_rates=dropout_rates, lr=lr,
@@ -199,25 +211,24 @@ class PytorchModelHelper:
         # 如果有模型就加载模型
         if model_dict is not None:
             self.model.load_state_dict(model_dict)
-            print("Load the model with state dict")
 
         elif model_path is not None:
-            print("Load the model with model path")
             self.model.load_state_dict(torch.load(model_path))
 
         else:
-            print("Load the model with nothing, this is a new model")
+            if self.verbose:
+                print("Load the model with nothing, this is a new model")
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.1, patience=3,
                                                               eps=1e-4,
                                                               verbose=True)
-
-        print("=====================================================")
-        print("Model : {} ;".format(self.model.__class__.__name__))
-        print("Model net : {} ;".format(self.model))
-        print("Scheduler : {} ;".format(self.scheduler.__class__.__name__))
-        print("=====================================================")
+        if self.verbose:
+            print("=====================================================")
+            print("Model : {} ;".format(self.model.__class__.__name__))
+            print("Model net : {} ;".format(self.model))
+            print("Scheduler : {} ;".format(self.scheduler.__class__.__name__))
+            print("=====================================================")
 
     def __train(self):
         self.model.train()
